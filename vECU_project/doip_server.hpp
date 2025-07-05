@@ -4,7 +4,7 @@
 #include <vector>
 #include <thread>
 #include <boost/asio.hpp>
-#include "doip_session.hpp" // Include the new session header
+#include "doip_session.hpp"
 
 using boost::asio::ip::tcp;
 
@@ -32,17 +32,12 @@ public:
 
 private:
     void start_accept() {
-        // Asynchronously accept a new connection.
         m_acceptor.async_accept([this](const boost::system::error_code& error, tcp::socket socket) {
             if (!error) {
-                // Connection successful. Create a new session and start it.
-                // The session will manage its own lifecycle from here.
                 std::make_shared<DoIPSession>(std::move(socket))->start();
             } else {
                 std::cerr << "[DoIP] Error accepting connection: " << error.message() << std::endl;
             }
-
-            // Immediately start waiting for the next connection.
             start_accept();
         });
     }

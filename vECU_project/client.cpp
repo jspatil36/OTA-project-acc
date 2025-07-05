@@ -52,6 +52,8 @@ int main(int argc, char* argv[]) {
 
         if (command == "--identify") {
             if (!send_and_receive(socket, 0x0004, {}, response_payload)) return 1;
+            std::string vin(response_payload.begin(), response_payload.end());
+            std::cout << "[CLIENT] Vehicle VIN: " << vin << std::endl;
 
         } else if (command == "--program") {
             std::vector<uint8_t> payload;
@@ -86,9 +88,9 @@ int main(int argc, char* argv[]) {
             // 1. Request Download
             std::vector<uint8_t> req_download_payload;
             req_download_payload.push_back(UDS_REQUEST_DOWNLOAD);
-            req_download_payload.push_back(0x00);
-            req_download_payload.push_back(0x44);
-            req_download_payload.insert(req_download_payload.end(), {0x00, 0x00, 0x00, 0x00});
+            req_download_payload.push_back(0x00); // dataFormatIdentifier
+            req_download_payload.push_back(0x44); // addressAndLengthFormatIdentifier
+            req_download_payload.insert(req_download_payload.end(), {0x00, 0x00, 0x00, 0x00}); // memoryAddress
             req_download_payload.push_back((file_size >> 24) & 0xFF);
             req_download_payload.push_back((file_size >> 16) & 0xFF);
             req_download_payload.push_back((file_size >> 8) & 0xFF);
@@ -118,6 +120,7 @@ int main(int argc, char* argv[]) {
             std::vector<uint8_t> exit_payload;
             exit_payload.push_back(UDS_REQUEST_TRANSFER_EXIT);
             exit_payload.insert(exit_payload.end(), new_firmware_hash_opt->begin(), new_firmware_hash_opt->end());
+
             if (!send_and_receive(socket, 0x8001, exit_payload, response_payload)) return 1;
 
         } else {
@@ -162,17 +165,22 @@ bool send_and_receive(tcp::socket& socket, uint16_t type, const std::vector<uint
     std::cout << "\n--- [CLIENT] Response Received ---" << std::endl;
     printf("  Response Type: 0x%04X, Length: %u\n", response_header.payload_type);
 
-    if (response_header.payload_type == 0x8002) {
-        std::cerr << "--- Verification FAILED: ECU returned an error. ---" << std::endl;
-        return false;
-    } else {
-        // Specific checks for UDS positive/negative responses
-        if (type == 0x8001 && !response_payload.empty() && response_payload[0] == 0x7F) {
-            std::cerr << "--- Verification FAILED: ECU returned a Negative Response. ---" << std::endl;
-            return false;
-        }
-        std::cout << "--- Verification SUCCESS ---" << std::endl;
+    if (response_header.payload_type == 0x0000) { // Routing activation response
+        std::cout << "--- Routing activation successful ---" << std::endl;
+        return true;
     }
+    
+    if (response_header.payload_type == 0x8002) { // Negative ACK for UDS
+        std::cerr << "--- Verification FAILED: ECU returned a NACK. ---" << std::endl;
+        return false;
+    }
+
+    if (type == 0x8001 && !response_payload.empty() && response_payload[0] == 0x7F) {
+        std::cerr << "--- Verification FAILED: ECU returned a Negative Response Code (NRC). ---" << std::endl;
+        return false;
+    }
+    
+    std::cout << "--- Verification SUCCESS ---" << std::endl;
     return true;
 }
 

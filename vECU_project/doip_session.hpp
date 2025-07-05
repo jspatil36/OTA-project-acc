@@ -167,23 +167,30 @@ private:
                 auto calculated_hash_opt = calculate_file_hash("update.bin");
                 if (!calculated_hash_opt) {
                     std::cerr << "[SESSION] Failed to hash update.bin" << std::endl;
+                    do_write_generic_response(0x8002, {}); // Generic error
                     break;
                 }
-                std::string expected_hash(m_payload.begin() + 1, m_payload.end());
-                std::cout << "  -> Expected Hash:   " << expected_hash << std::endl;
+                
+                std::string expected_hash_hex(m_payload.begin() + 1, m_payload.end());
+                
+                std::cout << "  -> Expected Hash:   " << expected_hash_hex << std::endl;
                 std::cout << "  -> Calculated Hash: " << *calculated_hash_opt << std::endl;
-                if (*calculated_hash_opt == expected_hash) {
+
+                if (*calculated_hash_opt == expected_hash_hex) {
                     std::cout << "[SESSION] Integrity check PASSED for new firmware." << std::endl;
-                    do_write_generic_response(0x8001, {0x77});
-                    apply_update(g_executable_path);
+                    response_payload.push_back(0x77); // Positive response
+                    do_write_generic_response(0x8001, response_payload);
+                    apply_update(g_executable_path); // This now applies the update to the library
                 } else {
                     std::cerr << "[SESSION] !!! INTEGRITY CHECK FAILED for new firmware !!!" << std::endl;
+                    do_write_generic_response(0x8002, {}); // Generic error
                 }
-                return;
+                return; // Important: return after handling
             }
         }
+        // If we fall through, it's an unsupported command or an error happened
         std::cout << "[SESSION] Received unsupported or out-of-sequence UDS command." << std::endl;
-        do_read_header();
+        do_write_generic_response(0x8002, {}); // Send generic error
     }
 
     void do_write_generic_response(uint16_t payload_type, const std::vector<uint8_t>& payload) {
@@ -196,11 +203,14 @@ private:
 
         std::vector<boost::asio::const_buffer> buffers;
         buffers.push_back(boost::asio::buffer(response_header.get(), sizeof(DoIPHeader)));
-        buffers.push_back(boost::asio::buffer(payload));
+        if (!payload.empty()) {
+            buffers.push_back(boost::asio::buffer(payload));
+        }
 
         boost::asio::async_write(m_socket, buffers,
             [this, self, response_header](const boost::system::error_code& ec, std::size_t bytes) {
                 if (!ec) {
+                    // After responding, wait for the next message
                     do_read_header();
                 } else {
                     std::cerr << "[SESSION] Error on write: " << ec.message() << std::endl;
@@ -213,23 +223,9 @@ private:
         std::string vin = "VECU-SIM-1234567";
         std::vector<uint8_t> payload;
         payload.insert(payload.end(), vin.begin(), vin.end());
-        auto response_header = std::make_shared<DoIPHeader>();
-        response_header->protocol_version = 0x02;
-        response_header->inverse_protocol_version = ~response_header->protocol_version;
-        response_header->payload_type = htons(0x0005);
-        response_header->payload_length = htonl(payload.size());
-        std::vector<boost::asio::const_buffer> buffers;
-        buffers.push_back(boost::asio::buffer(response_header.get(), sizeof(DoIPHeader)));
-        buffers.push_back(boost::asio::buffer(payload));
-        boost::asio::async_write(m_socket, buffers,
-            [this, self, response_header](const boost::system::error_code& ec, std::size_t bytes_transferred) {
-                if (!ec) {
-                    std::cout << "[SESSION] Sent " << bytes_transferred << " byte response." << std::endl;
-                    do_read_header();
-                } else {
-                    std::cerr << "[SESSION] Error on write: " << ec.message() << std::endl;
-                }
-            });
+        
+        // This response is for Vehicle Announcement Message
+        do_write_generic_response(0x0005, payload);
     }
 
     tcp::socket m_socket;

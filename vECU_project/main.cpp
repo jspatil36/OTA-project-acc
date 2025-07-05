@@ -9,33 +9,51 @@
 #include <sstream>
 #include <fstream>
 #include <cstdio>
+#include <random>
 
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <dlfcn.h> // Required for dynamic library loading
 
 #include "ecu_state.hpp"
 #include "nvram_manager.hpp"
 #include "doip_server.hpp"
 
-// Global state and control variables
+// --- Global state and control variables ---
 std::atomic<EcuState> g_ecu_state(EcuState::BOOT);
 std::atomic<bool> g_running(true);
 NVRAMManager g_nvram("nvram.dat");
 std::string g_executable_path;
 
-// Networking objects
+// --- Dynamic Library Handling ---
+void* g_acc_library_handle = nullptr;
+void (*g_run_acc_application)() = nullptr;
+
+// --- OS-SPECIFIC LIBRARY NAME ---
+// This uses preprocessor directives to set the correct library name based on the OS
+#if defined(__APPLE__)
+    const std::string ACC_LIBRARY_PATH = "./libacc_app.dylib";
+#else
+    const std::string ACC_LIBRARY_PATH = "./libacc_app.so";
+#endif
+
+
+// --- Networking objects ---
 boost::asio::io_context g_io_context;
 std::unique_ptr<DoIPServer> g_doip_server;
 std::thread g_server_thread;
 
-// Function Prototypes
+// --- Function Prototypes ---
 void run_boot_sequence(const std::string& executable_path);
 void run_application_mode();
 void handle_signal(int signal);
 void start_network_server();
 void stop_network_server();
 std::optional<std::string> calculate_file_hash(const std::string& file_path);
-void apply_update(const std::string& current_executable_path);
+void apply_update(const std::string& library_path);
+bool load_acc_application();
+void unload_acc_application();
+void simulate_environment_change();
 
 
 std::optional<std::string> calculate_file_hash(const std::string& file_path) {
@@ -86,7 +104,8 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, handle_signal);
 
-    std::cout << "--- Virtual ECU Simulation V1 Started ---" << std::endl;
+    std::cout << "--- Virtual ECU Simulation V3 Started ---" << std::endl;
+    std::cout << "--- You can edit 'nvram.dat' to change ACC_GAP_SETTING at runtime. ---" << std::endl;
     std::cout << "Press Ctrl+C to shut down." << std::endl;
 
     start_network_server();
@@ -111,6 +130,7 @@ int main(int argc, char* argv[]) {
     }
 
     stop_network_server();
+    unload_acc_application(); // Unload the library on shutdown
     std::cout << "--- Virtual ECU Simulation Shutting Down ---" << std::endl;
     return 0;
 }
@@ -128,6 +148,9 @@ void start_network_server() {
 }
 
 void stop_network_server() {
+    if (g_doip_server) {
+        g_doip_server->stop();
+    }
     if (g_server_thread.joinable()) {
         g_server_thread.join();
     }
@@ -140,45 +163,87 @@ void run_boot_sequence(const std::string& executable_path) {
         g_ecu_state = EcuState::BRICKED;
         return;
     }
-
-    std::cout << "[BOOT] Performing Secure Boot integrity check..." << std::endl;
-    auto golden_hash_opt = g_nvram.get_string("FIRMWARE_HASH_GOLDEN");
-    if (!golden_hash_opt) {
-        std::cerr << "[BOOT] CRITICAL: Golden firmware hash not found in NVRAM. Halting." << std::endl;
-        g_ecu_state = EcuState::BRICKED;
-        return;
-    }
-    auto calculated_hash_opt = calculate_file_hash(executable_path);
-    if (!calculated_hash_opt) {
-        std::cerr << "[BOOT] CRITICAL: Could not calculate hash of running executable. Halting." << std::endl;
-        g_ecu_state = EcuState::BRICKED;
-        return;
-    }
-    std::cout << "  -> Golden Hash: " << *golden_hash_opt << std::endl;
-    std::cout << "  -> Calculated Hash: " << *calculated_hash_opt << std::endl;
-    if (*golden_hash_opt != *calculated_hash_opt) {
-        std::cerr << "[BOOT] !!! INTEGRITY CHECK FAILED !!! Hashes do not match. Entering BRICKED state." << std::endl;
-        g_ecu_state = EcuState::BRICKED;
-        return;
-    }
-    std::cout << "[BOOT] Integrity check PASSED." << std::endl;
-
-    auto fw_version = g_nvram.get_string("FIRMWARE_VERSION");
-    if(fw_version) {
-        std::cout << "[BOOT] Current Firmware Version: " << *fw_version << std::endl;
-    }
-    std::cout << "  -> Initializing peripherals (simulated)..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    std::cout << "  -> Performing Power-On Self-Test (POST)..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    std::cout << "  -> Boot successful. Transitioning to APPLICATION state." << std::endl;
+    
+    std::cout << "[BOOT] Boot sequence complete. Transitioning to APPLICATION state." << std::endl;
     g_ecu_state = EcuState::APPLICATION;
 }
 
+void simulate_environment_change() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_int_distribution<> distrib(1, 100);
+
+    // Randomly decide to change the lead car's speed to make it less predictable
+    if (distrib(gen) > 80) { // 20% chance of change each cycle
+        g_nvram.load();
+        int current_speed = std::stoi(g_nvram.get_string("LEAD_VEHICLE_SPEED").value_or("65"));
+        
+        // Change speed by -2, -1, +1, or +2 mph
+        int change = (distrib(gen) % 4) - 1; 
+        if (change >= 0) change++; // make it -2, -1, 1, 2
+
+        current_speed += change;
+
+        // Keep speed within a reasonable range
+        if (current_speed < 50) current_speed = 50;
+        if (current_speed > 80) current_speed = 80;
+
+        std::cout << "[ENV] Lead vehicle speed changed to " << current_speed << " mph." << std::endl;
+        g_nvram.set_string("LEAD_VEHICLE_SPEED", std::to_string(current_speed));
+        g_nvram.save();
+    }
+}
+
 void run_application_mode() {
-    if (g_running) {
-        std::cout << "[STATE] In APPLICATION. Running main logic..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+    if (!g_running) return;
+    
+    // 1. Simulate the environment (e.g., sensor data changing)
+    simulate_environment_change();
+
+    // 2. Try to load or reload the application logic
+    if (load_acc_application()) {
+        // 3. If loaded successfully, run the application
+        if (g_run_acc_application) {
+            g_run_acc_application();
+        }
+    } else {
+        std::cerr << "[APP] Failed to run application logic." << std::endl;
+    }
+    
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+}
+
+bool load_acc_application() {
+    // Unload the library if it's already loaded to ensure we pick up changes on the next load.
+    if (g_acc_library_handle) {
+        dlclose(g_acc_library_handle);
+        g_acc_library_handle = nullptr;
+    }
+
+    g_acc_library_handle = dlopen(ACC_LIBRARY_PATH.c_str(), RTLD_LAZY);
+    if (!g_acc_library_handle) {
+        std::cerr << "[APP] ERROR: Cannot load shared library: " << dlerror() << std::endl;
+        return false;
+    }
+
+    // Load the symbol (the function) from the library
+    g_run_acc_application = (void (*)())dlsym(g_acc_library_handle, "run_acc_application");
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+        std::cerr << "[APP] ERROR: Cannot find symbol 'run_acc_application': " << dlsym_error << std::endl;
+        dlclose(g_acc_library_handle);
+        g_acc_library_handle = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void unload_acc_application() {
+    if (g_acc_library_handle) {
+        dlclose(g_acc_library_handle);
+        g_acc_library_handle = nullptr;
+        g_run_acc_application = nullptr;
+        std::cout << "[APP] Unloaded ACC application library." << std::endl;
     }
 }
 
@@ -192,15 +257,18 @@ void handle_signal(int signal) {
     }
 }
 
+// This function now applies the update to the shared library
 void apply_update(const std::string& current_executable_path) {
-    std::cout << "[OTA] Applying update..." << std::endl;
-    if (std::rename("update.bin", current_executable_path.c_str()) != 0) {
-        perror("[OTA] CRITICAL: Failed to apply update");
+    std::cout << "[OTA] Applying update to ACC application..." << std::endl;
+    
+    // Unload the old library before overwriting it
+    unload_acc_application();
+
+    if (std::rename("update.bin", ACC_LIBRARY_PATH.c_str()) != 0) {
+        perror("[OTA] CRITICAL: Failed to apply update to library");
     } else {
-        std::cout << "[OTA] Update applied successfully. ECU will shut down." << std::endl;
+        std::cout << "[OTA] Update applied successfully to " << ACC_LIBRARY_PATH << ". ECU will reload it." << std::endl;
     }
-    if (g_doip_server) {
-        g_doip_server->stop();
-    }
-    g_running = false;
+    // The ECU no longer shuts down, it will just reload the library on the next loop
+    g_ecu_state = EcuState::APPLICATION; 
 }
