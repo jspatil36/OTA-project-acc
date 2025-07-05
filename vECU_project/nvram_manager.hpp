@@ -7,28 +7,10 @@
 #include <optional>
 #include <mutex>
 
-/**
- * @class NVRAMManager
- * @brief Simulates a simple Non-Volatile RAM by reading from and writing to a file.
- *
- * This class provides a basic key-value store that persists data in a plain text file,
- * mimicking how an ECU might store configuration data in its flash memory.
- * It is now thread-safe to prevent race conditions.
- */
 class NVRAMManager {
 public:
-    /**
-     * @brief Constructor.
-     * @param filename The path to the file to be used for persistent storage.
-     */
     explicit NVRAMManager(const std::string& filename) : m_filename(filename) {}
 
-    /**
-     * @brief Loads the key-value data from the NVRAM file in a thread-safe manner.
-     *
-     * If the file doesn't exist, it creates a default configuration.
-     * @return True if loading was successful, false otherwise.
-     */
     bool load() {
         std::lock_guard<std::mutex> lock(m_mutex);
         std::ifstream file(m_filename);
@@ -37,7 +19,7 @@ public:
             return create_default_nvram_internal();
         }
 
-        m_data.clear(); // Clear existing data before loading
+        m_data.clear();
         std::string line;
         while (std::getline(file, line)) {
             size_t delimiter_pos = line.find('=');
@@ -50,10 +32,6 @@ public:
         return true;
     }
 
-    /**
-     * @brief Saves the current key-value data to the NVRAM file in a thread-safe manner.
-     * @return True if saving was successful, false otherwise.
-     */
     bool save() {
         std::lock_guard<std::mutex> lock(m_mutex);
         std::ofstream file(m_filename, std::ios::trunc);
@@ -68,11 +46,6 @@ public:
         return true;
     }
 
-    /**
-     * @brief Retrieves a string value for a given key.
-     * @param key The key to look up.
-     * @return An std::optional containing the value if the key exists, otherwise std::nullopt.
-     */
     std::optional<std::string> get_string(const std::string& key) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_data.find(key);
@@ -82,11 +55,6 @@ public:
         return std::nullopt;
     }
 
-    /**
-     * @brief Sets a string value for a given key.
-     * @param key The key to set.
-     * @param value The value to associate with the key.
-     */
     void set_string(const std::string& key, const std::string& value) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_data[key] = value;
@@ -97,15 +65,19 @@ private:
     std::map<std::string, std::string> m_data;
     std::mutex m_mutex;
 
-    /**
-     * @brief Internal method to create a default NVRAM file. Not thread-safe by itself.
-     */
+    // Creates a default NVRAM file with initial values for the advanced controller.
     bool create_default_nvram_internal() {
-        m_data["FIRMWARE_VERSION"] = "4.0.0";
-        m_data["ECU_SERIAL_NUMBER"] = "VECU-2025-004";
-        m_data["LEAD_VEHICLE_SPEED"] = "65";
-        m_data["OWN_VEHICLE_SPEED"] = "65";
-        m_data["ACC_GAP_SETTING"] = "3"; // e.g., 3 car lengths
+        m_data["FIRMWARE_VERSION"] = "5.0.0";
+        m_data["ECU_SERIAL_NUMBER"] = "VECU-2025-005";
+        m_data["LEAD_VEHICLE_SPEED"] = "65.0";
+        m_data["OWN_VEHICLE_SPEED"] = "65.0";
+        m_data["ACC_GAP_SETTING"] = "3";
+        
+        // --- New Advanced Parameters ---
+        m_data["ACC_KP"] = "0.4"; // Proportional gain
+        m_data["ACC_KI"] = "0.1"; // Integral gain
+        m_data["ACC_MAX_ACCEL"] = "2.0"; // Max speed increase per cycle (mph)
+        m_data["ACC_MAX_DECEL"] = "3.0"; // Max speed decrease per cycle (mph)
         
         std::ofstream file(m_filename);
         if (!file.is_open()) return false;
