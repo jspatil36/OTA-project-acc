@@ -101,8 +101,8 @@ private:
      * @brief Internal method to create a default NVRAM file. Not thread-safe by itself.
      */
     bool create_default_nvram_internal() {
-        m_data["FIRMWARE_VERSION"] = "3.0.0";
-        m_data["ECU_SERIAL_NUMBER"] = "VECU-2025-001";
+        m_data["FIRMWARE_VERSION"] = "4.0.0";
+        m_data["ECU_SERIAL_NUMBER"] = "VECU-2025-004";
         m_data["LEAD_VEHICLE_SPEED"] = "65";
         m_data["OWN_VEHICLE_SPEED"] = "65";
         m_data["ACC_GAP_SETTING"] = "3"; // e.g., 3 car lengths

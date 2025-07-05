@@ -29,7 +29,6 @@ std::string g_executable_path;
 void* g_acc_library_handle = nullptr;
 void (*g_run_acc_application)() = nullptr;
 
-// --- OS-SPECIFIC LIBRARY NAME ---
 // This uses preprocessor directives to set the correct library name based on the OS
 #if defined(__APPLE__)
     const std::string ACC_LIBRARY_PATH = "./libacc_app.dylib";
@@ -53,7 +52,6 @@ std::optional<std::string> calculate_file_hash(const std::string& file_path);
 void apply_update(const std::string& library_path);
 bool load_acc_application();
 void unload_acc_application();
-void simulate_environment_change();
 
 
 std::optional<std::string> calculate_file_hash(const std::string& file_path) {
@@ -104,8 +102,8 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, handle_signal);
 
-    std::cout << "--- Virtual ECU Simulation V3 Started ---" << std::endl;
-    std::cout << "--- You can edit 'nvram.dat' to change ACC_GAP_SETTING at runtime. ---" << std::endl;
+    std::cout << "--- Virtual ECU Simulation V4 Started ---" << std::endl;
+    std::cout << "--- Use the client to change speed and gap settings at runtime. ---" << std::endl;
     std::cout << "Press Ctrl+C to shut down." << std::endl;
 
     start_network_server();
@@ -168,41 +166,11 @@ void run_boot_sequence(const std::string& executable_path) {
     g_ecu_state = EcuState::APPLICATION;
 }
 
-void simulate_environment_change() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<> distrib(1, 100);
-
-    // Randomly decide to change the lead car's speed to make it less predictable
-    if (distrib(gen) > 80) { // 20% chance of change each cycle
-        g_nvram.load();
-        int current_speed = std::stoi(g_nvram.get_string("LEAD_VEHICLE_SPEED").value_or("65"));
-        
-        // Change speed by -2, -1, +1, or +2 mph
-        int change = (distrib(gen) % 4) - 1; 
-        if (change >= 0) change++; // make it -2, -1, 1, 2
-
-        current_speed += change;
-
-        // Keep speed within a reasonable range
-        if (current_speed < 50) current_speed = 50;
-        if (current_speed > 80) current_speed = 80;
-
-        std::cout << "[ENV] Lead vehicle speed changed to " << current_speed << " mph." << std::endl;
-        g_nvram.set_string("LEAD_VEHICLE_SPEED", std::to_string(current_speed));
-        g_nvram.save();
-    }
-}
-
 void run_application_mode() {
     if (!g_running) return;
     
-    // 1. Simulate the environment (e.g., sensor data changing)
-    simulate_environment_change();
-
-    // 2. Try to load or reload the application logic
+    // The environment is now stable and only changes via client commands.
     if (load_acc_application()) {
-        // 3. If loaded successfully, run the application
         if (g_run_acc_application) {
             g_run_acc_application();
         }
@@ -214,7 +182,6 @@ void run_application_mode() {
 }
 
 bool load_acc_application() {
-    // Unload the library if it's already loaded to ensure we pick up changes on the next load.
     if (g_acc_library_handle) {
         dlclose(g_acc_library_handle);
         g_acc_library_handle = nullptr;
@@ -226,7 +193,6 @@ bool load_acc_application() {
         return false;
     }
 
-    // Load the symbol (the function) from the library
     g_run_acc_application = (void (*)())dlsym(g_acc_library_handle, "run_acc_application");
     const char* dlsym_error = dlerror();
     if (dlsym_error) {
@@ -257,11 +223,9 @@ void handle_signal(int signal) {
     }
 }
 
-// This function now applies the update to the shared library
 void apply_update(const std::string& current_executable_path) {
     std::cout << "[OTA] Applying update to ACC application..." << std::endl;
     
-    // Unload the old library before overwriting it
     unload_acc_application();
 
     if (std::rename("update.bin", ACC_LIBRARY_PATH.c_str()) != 0) {
@@ -269,6 +233,5 @@ void apply_update(const std::string& current_executable_path) {
     } else {
         std::cout << "[OTA] Update applied successfully to " << ACC_LIBRARY_PATH << ". ECU will reload it." << std::endl;
     }
-    // The ECU no longer shuts down, it will just reload the library on the next loop
     g_ecu_state = EcuState::APPLICATION; 
 }

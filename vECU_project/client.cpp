@@ -21,13 +21,16 @@ struct DoIPHeader {
 #pragma pack(pop)
 
 // UDS Service IDs
+const uint8_t UDS_WRITE_DATA_BY_IDENTIFIER = 0x2E;
 const uint8_t UDS_ROUTINE_CONTROL = 0x31;
 const uint8_t UDS_REQUEST_DOWNLOAD = 0x34;
 const uint8_t UDS_TRANSFER_DATA = 0x36;
 const uint8_t UDS_REQUEST_TRANSFER_EXIT = 0x37;
 
-// UDS Routine Identifiers
+// UDS Routine & Data Identifiers
 const uint16_t UDS_ENTER_PROGRAMMING_SESSION = 0xFF00;
+const uint16_t DID_LEAD_VEHICLE_SPEED = 0xF101;
+const uint16_t DID_ACC_GAP_SETTING = 0xF102;
 
 // Function Prototypes
 bool send_and_receive(tcp::socket& socket, uint16_t type, const std::vector<uint8_t>& payload, std::vector<uint8_t>& response_payload);
@@ -36,7 +39,13 @@ std::optional<std::string> calculate_file_hash(const std::string& file_path);
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " --identify | --program | --update <file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <command> [options]" << std::endl;
+        std::cerr << "Commands:" << std::endl;
+        std::cerr << "  --identify" << std::endl;
+        std::cerr << "  --program" << std::endl;
+        std::cerr << "  --update <file>" << std::endl;
+        std::cerr << "  --set-speed <mph>" << std::endl;
+        std::cerr << "  --set-gap <cars>" << std::endl;
         return 1;
     }
 
@@ -45,7 +54,6 @@ int main(int argc, char* argv[]) {
         tcp::socket socket(io_context);
         tcp::resolver resolver(io_context);
         boost::asio::connect(socket, resolver.resolve("localhost", "13400"));
-        std::cout << "[CLIENT] Connected to server." << std::endl;
         
         std::string command = argv[1];
         std::vector<uint8_t> response_payload;
@@ -63,6 +71,23 @@ int main(int argc, char* argv[]) {
             payload.push_back(UDS_ENTER_PROGRAMMING_SESSION & 0xFF);
             if (!send_and_receive(socket, 0x8001, payload, response_payload)) return 1;
 
+        } else if (command == "--set-speed" || command == "--set-gap") {
+            if (argc != 3) {
+                std::cerr << "Usage: " << argv[0] << " " << command << " <value>" << std::endl;
+                return 1;
+            }
+            uint16_t did = (command == "--set-speed") ? DID_LEAD_VEHICLE_SPEED : DID_ACC_GAP_SETTING;
+            uint8_t value = std::stoi(argv[2]);
+
+            std::cout << "[CLIENT] Setting DID 0x" << std::hex << did << " to value " << std::dec << (int)value << std::endl;
+
+            std::vector<uint8_t> payload;
+            payload.push_back(UDS_WRITE_DATA_BY_IDENTIFIER);
+            payload.push_back((did >> 8) & 0xFF);
+            payload.push_back(did & 0xFF);
+            payload.push_back(value);
+            if (!send_and_receive(socket, 0x8001, payload, response_payload)) return 1;
+
         } else if (command == "--update") {
             if (argc != 3) {
                 std::cerr << "Usage: " << argv[0] << " --update <file>" << std::endl;
@@ -71,56 +96,59 @@ int main(int argc, char* argv[]) {
             std::string file_path = argv[2];
             
             auto new_firmware_hash_opt = calculate_file_hash(file_path);
-            if (!new_firmware_hash_opt) {
-                std::cerr << "Error: Could not calculate hash of file " << file_path << std::endl;
-                return 1;
-            }
+            if (!new_firmware_hash_opt) return 1;
             std::cout << "[CLIENT] New firmware hash: " << *new_firmware_hash_opt << std::endl;
 
-            std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+            std::ifstream file(file_path, std::ios::binary);
             if (!file.is_open()) {
-                std::cerr << "Error: Cannot open file " << file_path << std::endl;
+                 std::cerr << "Error: Cannot open file " << file_path << std::endl;
                 return 1;
             }
-            uint32_t file_size = file.tellg();
-            file.seekg(0, std::ios::beg);
 
             // 1. Request Download
+            file.seekg(0, std::ios::end);
+            uint32_t file_size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            
             std::vector<uint8_t> req_download_payload;
             req_download_payload.push_back(UDS_REQUEST_DOWNLOAD);
-            req_download_payload.push_back(0x00); // dataFormatIdentifier
-            req_download_payload.push_back(0x44); // addressAndLengthFormatIdentifier
-            req_download_payload.insert(req_download_payload.end(), {0x00, 0x00, 0x00, 0x00}); // memoryAddress
+            req_download_payload.push_back(0x00);
+            req_download_payload.push_back(0x44);
+            req_download_payload.insert(req_download_payload.end(), {0x00, 0x00, 0x00, 0x00});
             req_download_payload.push_back((file_size >> 24) & 0xFF);
             req_download_payload.push_back((file_size >> 16) & 0xFF);
             req_download_payload.push_back((file_size >> 8) & 0xFF);
             req_download_payload.push_back(file_size & 0xFF);
-
             if (!send_and_receive(socket, 0x8001, req_download_payload, response_payload)) return 1;
 
             // 2. Transfer Data
             const size_t CHUNK_SIZE = 4096;
             std::vector<char> buffer(CHUNK_SIZE);
             uint8_t block_counter = 1;
-            while (file.read(buffer.data(), CHUNK_SIZE) || file.gcount() > 0) {
+            
+            // *** CORRECTED AND ROBUST FILE READING LOOP ***
+            while (file.read(buffer.data(), buffer.size())) {
+                std::vector<uint8_t> transfer_payload;
+                transfer_payload.push_back(UDS_TRANSFER_DATA);
+                transfer_payload.push_back(block_counter++);
+                transfer_payload.insert(transfer_payload.end(), buffer.begin(), buffer.end());
+                if (!send_and_receive(socket, 0x8001, transfer_payload, response_payload)) return 1;
+            }
+            // Handle the final, partial chunk if it exists
+            if (file.gcount() > 0) {
                 size_t bytes_read = file.gcount();
-                std::cout << "[CLIENT] Transferring chunk " << (int)block_counter << " (" << bytes_read << " bytes)..." << std::endl;
-
                 std::vector<uint8_t> transfer_payload;
                 transfer_payload.push_back(UDS_TRANSFER_DATA);
                 transfer_payload.push_back(block_counter++);
                 transfer_payload.insert(transfer_payload.end(), buffer.begin(), buffer.begin() + bytes_read);
-                
                 if (!send_and_receive(socket, 0x8001, transfer_payload, response_payload)) return 1;
             }
             std::cout << "[CLIENT] File transfer complete." << std::endl;
 
             // 3. Request Transfer Exit
-            std::cout << "[CLIENT] Sending Transfer Exit request..." << std::endl;
             std::vector<uint8_t> exit_payload;
             exit_payload.push_back(UDS_REQUEST_TRANSFER_EXIT);
             exit_payload.insert(exit_payload.end(), new_firmware_hash_opt->begin(), new_firmware_hash_opt->end());
-
             if (!send_and_receive(socket, 0x8001, exit_payload, response_payload)) return 1;
 
         } else {
@@ -135,18 +163,10 @@ int main(int argc, char* argv[]) {
 }
 
 bool send_and_receive(tcp::socket& socket, uint16_t type, const std::vector<uint8_t>& payload, std::vector<uint8_t>& response_payload) {
-    DoIPHeader header;
-    header.protocol_version = 0x02;
-    header.inverse_protocol_version = ~header.protocol_version;
-    header.payload_type = type;
-    header.payload_length = payload.size();
-
-    DoIPHeader network_header = header;
-    network_header.payload_type = htons(header.payload_type);
-    network_header.payload_length = htonl(header.payload_length);
+    DoIPHeader header = {0x02, (uint8_t)~0x02, htons(type), htonl((uint32_t)payload.size())};
 
     std::vector<boost::asio::const_buffer> request_buffers;
-    request_buffers.push_back(boost::asio::buffer(&network_header, sizeof(network_header)));
+    request_buffers.push_back(boost::asio::buffer(&header, sizeof(header)));
     if (!payload.empty()) {
         request_buffers.push_back(boost::asio::buffer(payload));
     }
@@ -162,25 +182,12 @@ bool send_and_receive(tcp::socket& socket, uint16_t type, const std::vector<uint
         boost::asio::read(socket, boost::asio::buffer(response_payload));
     }
     
-    std::cout << "\n--- [CLIENT] Response Received ---" << std::endl;
-    printf("  Response Type: 0x%04X, Length: %u\n", response_header.payload_type);
-
-    if (response_header.payload_type == 0x0000) { // Routing activation response
-        std::cout << "--- Routing activation successful ---" << std::endl;
-        return true;
-    }
-    
-    if (response_header.payload_type == 0x8002) { // Negative ACK for UDS
-        std::cerr << "--- Verification FAILED: ECU returned a NACK. ---" << std::endl;
-        return false;
-    }
-
-    if (type == 0x8001 && !response_payload.empty() && response_payload[0] == 0x7F) {
-        std::cerr << "--- Verification FAILED: ECU returned a Negative Response Code (NRC). ---" << std::endl;
+    if (response_header.payload_type == 0x8002 || (!response_payload.empty() && response_payload[0] == 0x7F)) {
+        std::cerr << "--- FAILED: ECU returned a Negative Response. ---" << std::endl;
         return false;
     }
     
-    std::cout << "--- Verification SUCCESS ---" << std::endl;
+    std::cout << "--- SUCCESS ---" << std::endl;
     return true;
 }
 
@@ -190,18 +197,22 @@ std::optional<std::string> calculate_file_hash(const std::string& file_path) {
         return std::nullopt;
     }
     EVP_MD_CTX* md_context = EVP_MD_CTX_new();
-    if (!md_context || 1 != EVP_DigestInit_ex(md_context, EVP_sha256(), NULL)) {
-        if(md_context) EVP_MD_CTX_free(md_context);
+    if (!md_context) return std::nullopt;
+
+    if (1 != EVP_DigestInit_ex(md_context, EVP_sha256(), NULL)) {
+        EVP_MD_CTX_free(md_context);
         return std::nullopt;
     }
 
     char buffer[1024];
+    // *** CORRECTED HASH CALCULATION LOOP ***
     while (file.read(buffer, sizeof(buffer))) {
         if (1 != EVP_DigestUpdate(md_context, buffer, file.gcount())) {
             EVP_MD_CTX_free(md_context);
             return std::nullopt;
         }
     }
+    // Handle the final partial block
     if (file.gcount() > 0) {
         if (1 != EVP_DigestUpdate(md_context, buffer, file.gcount())) {
             EVP_MD_CTX_free(md_context);
@@ -215,6 +226,7 @@ std::optional<std::string> calculate_file_hash(const std::string& file_path) {
         EVP_MD_CTX_free(md_context);
         return std::nullopt;
     }
+    
     EVP_MD_CTX_free(md_context);
 
     std::stringstream ss;

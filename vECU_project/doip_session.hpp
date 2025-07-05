@@ -10,10 +10,12 @@
 #include <boost/asio.hpp>
 
 #include "ecu_state.hpp"
+#include "nvram_manager.hpp" // Include NVRAM manager
 
 // Forward declare global state variables and functions from main.cpp
 extern std::atomic<EcuState> g_ecu_state;
 extern std::string g_executable_path;
+extern NVRAMManager g_nvram; // Access the global NVRAM object
 extern std::optional<std::string> calculate_file_hash(const std::string& file_path);
 extern void apply_update(const std::string& current_executable_path);
 
@@ -27,6 +29,18 @@ struct DoIPHeader {
     uint32_t payload_length;
 };
 #pragma pack(pop)
+
+// Define UDS Service IDs
+const uint8_t UDS_WRITE_DATA_BY_IDENTIFIER = 0x2E;
+const uint8_t UDS_ROUTINE_CONTROL = 0x31;
+const uint8_t UDS_REQUEST_DOWNLOAD = 0x34;
+const uint8_t UDS_TRANSFER_DATA = 0x36;
+const uint8_t UDS_REQUEST_TRANSFER_EXIT = 0x37;
+
+// Define Data Identifiers for service 0x2E
+const uint16_t DID_LEAD_VEHICLE_SPEED = 0xF101;
+const uint16_t DID_ACC_GAP_SETTING = 0xF102;
+
 
 class DoIPSession : public std::enable_shared_from_this<DoIPSession> {
 public:
@@ -49,8 +63,6 @@ private:
                 if (!ec) {
                     m_received_header.payload_type = ntohs(m_received_header.payload_type);
                     m_received_header.payload_length = ntohl(m_received_header.payload_length);
-
-                    printf("[SESSION] Received Header -> Type: 0x%04X, Length: %u\n", m_received_header.payload_type, m_received_header.payload_length);
                     do_read_payload();
                 } else if (ec != boost::asio::error::eof) {
                     std::cerr << "[SESSION] Error reading header: " << ec.message() << std::endl;
@@ -81,14 +93,12 @@ private:
     void process_message() {
         switch (m_received_header.payload_type) {
             case 0x0004: // Vehicle Identification Request
-                std::cout << "[SESSION] Responding to Vehicle ID Request..." << std::endl;
                 do_write_vehicle_announcement();
                 break;
             case 0x8001: // UDS Message
                 handle_uds_message();
                 break;
             default:
-                std::cout << "[SESSION] Received unhandled message type. Waiting for next message." << std::endl;
                 do_read_header();
                 break;
         }
@@ -104,11 +114,35 @@ private:
         std::vector<uint8_t> response_payload;
 
         switch (service_id) {
-            case 0x31: { // Routine Control
-                if (m_payload.size() < 4) break;
+            case UDS_WRITE_DATA_BY_IDENTIFIER: {
+                if (m_payload.size() < 4) {
+                    break;
+                }
+                uint16_t data_id = (m_payload[1] << 8) | m_payload[2];
+                uint8_t value = m_payload[3];
+
+                std::cout << "[SESSION] Received Write Data By ID. ID: 0x" << std::hex << data_id << ", Value: " << std::dec << (int)value << std::endl;
+
+                if (data_id == DID_LEAD_VEHICLE_SPEED) {
+                    g_nvram.set_string("LEAD_VEHICLE_SPEED", std::to_string(value));
+                } else if (data_id == DID_ACC_GAP_SETTING) {
+                    g_nvram.set_string("ACC_GAP_SETTING", std::to_string(value));
+                }
+                g_nvram.save();
+                
+                response_payload.push_back(0x6E); // Positive Response for 0x2E
+                response_payload.push_back(m_payload[1]);
+                response_payload.push_back(m_payload[2]);
+                do_write_generic_response(0x8001, response_payload);
+                return;
+            }
+
+            case UDS_ROUTINE_CONTROL: {
+                if (m_payload.size() < 4) {
+                    break;
+                }
                 uint16_t routine_id = (m_payload[2] << 8) | m_payload[3];
                 if (routine_id == 0xFF00) {
-                    std::cout << "[SESSION] Received command: Enter Programming Session." << std::endl;
                     g_ecu_state = EcuState::UPDATE_PENDING;
                     response_payload.push_back(0x71);
                     response_payload.insert(response_payload.end(), m_payload.begin() + 1, m_payload.end());
@@ -118,21 +152,16 @@ private:
                 break;
             }
 
-            case 0x34: { // Request Download
-                if (g_ecu_state != EcuState::UPDATE_PENDING) {
-                     std::cout << "[SESSION] ERROR: Request Download received outside of update session." << std::endl;
-                     break;
+            case UDS_REQUEST_DOWNLOAD: {
+                if (g_ecu_state != EcuState::UPDATE_PENDING || m_payload.size() < 10) {
+                    break;
                 }
-                if (m_payload.size() < 10) break;
                 m_firmware_file_size = (m_payload[6] << 24) | (m_payload[7] << 16) | (m_payload[8] << 8) | m_payload[9];
-                std::cout << "[SESSION] Received Request Download. Firmware size: " << m_firmware_file_size << " bytes." << std::endl;
                 m_update_file.open("update.bin", std::ios::binary | std::ios::trunc);
                 if (!m_update_file.is_open()) {
-                    std::cerr << "[SESSION] CRITICAL: Could not open update.bin for writing." << std::endl;
                     break;
                 }
                 m_bytes_received = 0;
-                std::cout << "[SESSION] Opened update.bin for writing. Ready for data transfer." << std::endl;
                 response_payload.push_back(0x74);
                 response_payload.push_back(0x20);
                 response_payload.push_back(0x10);
@@ -141,56 +170,48 @@ private:
                 return;
             }
 
-            case 0x36: { // Transfer Data
+            case UDS_TRANSFER_DATA: {
                 if (g_ecu_state != EcuState::UPDATE_PENDING || !m_update_file.is_open()) {
-                    std::cout << "[SESSION] ERROR: Transfer Data received in wrong state." << std::endl;
                     break;
                 }
                 const char* data_to_write = reinterpret_cast<const char*>(m_payload.data() + 2);
                 size_t data_size = m_payload.size() - 2;
                 m_update_file.write(data_to_write, data_size);
                 m_bytes_received += data_size;
-                std::cout << "[SESSION] Wrote " << data_size << " bytes to update.bin. Total received: " << m_bytes_received << "/" << m_firmware_file_size << std::endl;
                 response_payload.push_back(0x76);
                 response_payload.push_back(m_payload[1]);
                 do_write_generic_response(0x8001, response_payload);
                 return;
             }
 
-            case 0x37: { // Request Transfer Exit
+            case UDS_REQUEST_TRANSFER_EXIT: {
                 if (g_ecu_state != EcuState::UPDATE_PENDING || !m_update_file.is_open()) {
-                    std::cout << "[SESSION] ERROR: Transfer Exit received in wrong state." << std::endl;
                     break;
                 }
                 m_update_file.close();
-                std::cout << "[SESSION] Finalizing file transfer." << std::endl;
                 auto calculated_hash_opt = calculate_file_hash("update.bin");
                 if (!calculated_hash_opt) {
-                    std::cerr << "[SESSION] Failed to hash update.bin" << std::endl;
-                    do_write_generic_response(0x8002, {}); // Generic error
                     break;
                 }
-                
                 std::string expected_hash_hex(m_payload.begin() + 1, m_payload.end());
-                
-                std::cout << "  -> Expected Hash:   " << expected_hash_hex << std::endl;
-                std::cout << "  -> Calculated Hash: " << *calculated_hash_opt << std::endl;
-
                 if (*calculated_hash_opt == expected_hash_hex) {
-                    std::cout << "[SESSION] Integrity check PASSED for new firmware." << std::endl;
-                    response_payload.push_back(0x77); // Positive response
+                    response_payload.push_back(0x77);
                     do_write_generic_response(0x8001, response_payload);
-                    apply_update(g_executable_path); // This now applies the update to the library
+                    apply_update(g_executable_path);
                 } else {
                     std::cerr << "[SESSION] !!! INTEGRITY CHECK FAILED for new firmware !!!" << std::endl;
-                    do_write_generic_response(0x8002, {}); // Generic error
+                    do_write_generic_response(0x8002, {});
                 }
-                return; // Important: return after handling
+                return;
             }
+            
+            default:
+                break;
         }
-        // If we fall through, it's an unsupported command or an error happened
+
+        // Default case for any unhandled service ID or a 'break' from a case
         std::cout << "[SESSION] Received unsupported or out-of-sequence UDS command." << std::endl;
-        do_write_generic_response(0x8002, {}); // Send generic error
+        do_write_generic_response(0x8002, {});
     }
 
     void do_write_generic_response(uint16_t payload_type, const std::vector<uint8_t>& payload) {
@@ -210,7 +231,6 @@ private:
         boost::asio::async_write(m_socket, buffers,
             [this, self, response_header](const boost::system::error_code& ec, std::size_t bytes) {
                 if (!ec) {
-                    // After responding, wait for the next message
                     do_read_header();
                 } else {
                     std::cerr << "[SESSION] Error on write: " << ec.message() << std::endl;
@@ -219,12 +239,8 @@ private:
     }
 
     void do_write_vehicle_announcement() {
-        auto self = shared_from_this();
         std::string vin = "VECU-SIM-1234567";
-        std::vector<uint8_t> payload;
-        payload.insert(payload.end(), vin.begin(), vin.end());
-        
-        // This response is for Vehicle Announcement Message
+        std::vector<uint8_t> payload(vin.begin(), vin.end());
         do_write_generic_response(0x0005, payload);
     }
 

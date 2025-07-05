@@ -1,6 +1,6 @@
 # --- Project Definition ---
 cmake_minimum_required(VERSION 3.15)
-project(VirtualECU VERSION 3.0 LANGUAGES CXX)
+project(VirtualECU VERSION 4.0 LANGUAGES CXX)
 
 # --- Standard and Properties ---
 set(CMAKE_CXX_STANDARD 17)
@@ -15,7 +15,7 @@ find_package(Boost REQUIRED COMPONENTS system)
 # The main ECU executable platform
 add_executable(TargetECU main.cpp)
 
-# The DoIP client for sending updates
+# The DoIP client for sending updates and commands
 add_executable(doip_client client.cpp)
 
 # The ACC application, compiled as a shared library

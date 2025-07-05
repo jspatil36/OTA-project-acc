@@ -9,7 +9,7 @@
 // This is a dynamic, reactive controller.
 void run_acc_application() {
     std::cout << "----------------------------------------" << std::endl;
-    std::cout << "[ACC] Controller Cycle Started." << std::endl;
+    std::cout << "[ACC] Controller V1.0.0 Cycle Started." << std::endl;
 
     NVRAMManager nvram("nvram.dat");
     if (!nvram.load()) {
