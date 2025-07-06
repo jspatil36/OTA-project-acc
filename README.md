@@ -165,22 +165,19 @@ Bash
 
 Verify: The ECU will automatically verify the file hash, apply the update, and return to the APPLICATION state, now running your new code.
 
-9. Project Structure
-.
-├── acc_controller.cpp      # Source for the standalone ACC feature
-├── acc_controller.hpp      # Header for the ACC feature
-├── client.cpp              # Source for the diagnostic client tool
-├── CMakeLists.txt          # Build configuration file
-├── doip_server.hpp         # Defines the main DoIP server class
-├── doip_session.hpp        # Handles logic for a single client connection and UDS messages
-├── ecu_state.hpp           # Defines the ECU's state machine enum
-├── main.cpp                # The main entry point for the ECU platform
-└── nvram_manager.hpp       # Simulates non-volatile memory for storing parameters
-10. Future Work & Potential Improvements
-Multi-Application Support: Modify the ECU platform to load and manage a list of multiple application libraries instead of just one.
+## 9. Project Structure
+acc_controller.cpp      # Source for the standalone ACC feature  
+acc_controller.hpp      # Header for the ACC feature  
+client.cpp              # Source for the diagnostic client tool  
+CMakeLists.txt          # Build configuration file  
+doip_server.hpp         # Defines the main DoIP server class  
+doip_session.hpp        # Handles logic for a single client connection and UDS messages  
+ecu_state.hpp           # Defines the ECU's state machine enum  
+main.cpp                # The main entry point for the ECU platform  
+nvram_manager.hpp       # Simulates non-volatile memory for storing parameters  
 
-More Complex Controller: Evolve the PI controller into a full PID (Proportional-Integral-Derivative) controller for more responsive handling.
-
-Enhanced Security: Implement digital signatures for OTA updates in addition to the hash check to ensure the firmware is from a trusted source.
-
-Robust Data Handling: Expand the UDS implementation to handle data values larger than a single byte, requiring more complex data serialization and deserialization.
+## 10. Future Work & Potential Improvements 
+Multi-Application Support: Modify the ECU platform to load and manage a list of multiple application libraries instead of just one.  
+More Complex Controller: Evolve the PI controller into a full PID (Proportional-Integral-Derivative) controller for more responsive handling.  
+Enhanced Security: Implement digital signatures for OTA updates in addition to the hash check to ensure the firmware is from a trusted source.  
+Robust Data Handling: Expand the UDS implementation to handle data values larger than a single byte, requiring more complex data serialization and deserialization.  
